@@ -18,8 +18,10 @@
 
 """Thoth: LogAggregator"""
 
+import os
 import json
 import codecs
+import tempfile
 
 import luigi
 from tornado import httpclient
@@ -29,7 +31,8 @@ __version__ = '0.1.0'
 
 TRAVIS_TOKEN = 'FlNtKcTAawHcpFTvxprCqA'
 HEADERS = {'Travis-API-Version': '3',
-           'User-Agent': 'ThothLogAggragator/0.1.0 luigi/2.5.7', 'Authorization': 'token ' + TRAVIS_TOKEN}
+           'User-Agent': 'ThothLogAggragator/0.1.0 luigi/2.5.7',
+           'Authorization': 'token ' + TRAVIS_TOKEN}
 
 
 class AggregateRepositories(luigi.Task):
@@ -48,6 +51,14 @@ class AggregateRepositories(luigi.Task):
 
             _response = json.load(reader(response.buffer))
 
+            try:
+                os.mkdir('data/{}'.format(self.owner))
+            except FileExistsError as e:
+                pass
+
+            with open('data/{}/repositories.json'.format(self.owner), 'w') as jsonoutfile:
+                json.dump(_response, jsonoutfile)
+
             with self.output().open('w') as outfile:
                 for entry in _response['repositories']:
                     print(entry['id'], file=outfile)
@@ -58,6 +69,54 @@ class AggregateRepositories(luigi.Task):
             print("Error: " + str(e))
 
         http_client.close()
+
+
+def getPageFromTravis(url, offset, limit=100):
+    http_client = httpclient.HTTPClient()
+    reader = codecs.getreader('utf-8')
+
+    try:
+        response = http_client.fetch(
+            '{}?offset={}&limit={}'.format(url, offset, limit), headers=HEADERS)
+
+        return json.load(reader(response.buffer))
+    except httpclient.HTTPError as e:
+        print("Error: " + str(e))
+
+    except Exception as e:
+        print("Error: " + str(e))
+
+    http_client.close()
+
+    return None
+
+
+class GetAllBuilds(luigi.Task):
+    owner = luigi.Parameter()
+
+    def output(self):
+        return luigi.LocalTarget('data/{}/builds.json'.format(self.owner))
+
+    def run(self):
+        is_last = False
+        offset = -100
+        limit = 100
+
+        all_builds = []
+
+        while not is_last:
+            builds = getPageFromTravis(
+                'https://api.travis-ci.org/builds', offset + limit)
+            print(json.dumps(builds['@pagination']))
+
+            is_last = builds['@pagination']['is_last']
+            offset = builds['@pagination']['offset']
+            limit = builds['@pagination']['limit']
+
+            all_builds.extend(builds['builds'])
+
+        with self.output().open('w') as outfile:
+            json.dump(all_builds, outfile)
 
 
 class AggregateJobs(luigi.Task):
@@ -72,6 +131,12 @@ class AggregateJobs(luigi.Task):
     def run(self):
         http_client = httpclient.HTTPClient()
         reader = codecs.getreader('utf-8')
+
+        # maybe we need that directory later...
+        try:
+            os.mkdir('data/{}'.format(self.owner))
+        except FileExistsError as e:
+            pass
 
         # lets read all the repo id
         with self.input().open('r') as infile:
@@ -116,7 +181,7 @@ class FetchLog(luigi.Task):
     owner = luigi.Parameter()
 
     def output(self):
-        return luigi.LocalTarget('data/{}/jobs/{}.json'.format(self.owner, self.job))
+        return luigi.LocalTarget('data/{}/jobs/{}/log.json'.format(self.owner, self.job))
 
     def run(self):
         http_client = httpclient.HTTPClient()
@@ -146,7 +211,7 @@ class FetchRawLog(luigi.Task):
     owner = luigi.Parameter()
 
     def output(self):
-        return luigi.LocalTarget('data/{}/jobs/{}.txt'.format(self.owner, self.job))
+        return luigi.LocalTarget('data/{}/jobs/{}/log.txt'.format(self.owner, self.job))
 
     def run(self):
         http_client = httpclient.HTTPClient()
@@ -167,5 +232,11 @@ class FetchRawLog(luigi.Task):
 
 
 if __name__ == '__main__':
+    try:
+        os.mkdir('data')
+    except FileExistsError as e:
+        pass
+
     luigi.build([AggregateLogs('radanalyticsio'),
-                 AggregateLogs('manageiq'), AggregateLogs('npm')])
+                 AggregateLogs('manageiq'),
+                 GetAllBuilds('goern')])
