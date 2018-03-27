@@ -36,7 +36,7 @@ class AggregateRepositories(luigi.Task):
     owner = luigi.Parameter()
 
     def output(self):
-        return luigi.LocalTarget("data/repositories-{}.tsv".format(self.owner))
+        return luigi.LocalTarget("data/{}/repositories.tsv".format(self.owner))
 
     def run(self):
         http_client = httpclient.HTTPClient()
@@ -64,7 +64,7 @@ class AggregateJobs(luigi.Task):
     owner = luigi.Parameter()
 
     def output(self):
-        return luigi.LocalTarget('data/jobs-{}.tsv'.format(self.owner))
+        return luigi.LocalTarget('data/{}/jobs.tsv'.format(self.owner))
 
     def requires(self):
         return AggregateRepositories(self.owner)
@@ -107,15 +107,16 @@ class AggregateLogs(luigi.Task):
         with self.input().open('r') as infile:
             jobs = infile.read().splitlines()
 
-        fetch_logs = [FetchLog(j) for j in jobs]
+        fetch_logs = [FetchLog(j, self.owner) for j in jobs]
         yield fetch_logs
 
 
 class FetchLog(luigi.Task):
     job = luigi.Parameter()
+    owner = luigi.Parameter()
 
     def output(self):
-        return luigi.LocalTarget('data/log-{}.json'.format(self.job))
+        return luigi.LocalTarget('data/{}/jobs/{}.json'.format(self.owner, self.job))
 
     def run(self):
         http_client = httpclient.HTTPClient()
@@ -137,14 +138,15 @@ class FetchLog(luigi.Task):
 
         http_client.close()
 
-        yield FetchRawLog(self.job)
+        yield FetchRawLog(self.job, self.owner)
 
 
 class FetchRawLog(luigi.Task):
     job = luigi.Parameter()
+    owner = luigi.Parameter()
 
     def output(self):
-        return luigi.LocalTarget('data/log-{}.txt'.format(self.job))
+        return luigi.LocalTarget('data/{}/jobs/{}.txt'.format(self.owner, self.job))
 
     def run(self):
         http_client = httpclient.HTTPClient()

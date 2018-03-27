@@ -1,7 +1,7 @@
 {
     "_meta": {
         "hash": {
-            "sha256": "f265ad00093aa4de3a98cf3d21c72135b9b882f703cb7c9d0b09cb2ded3c5a08"
+            "sha256": "52abaaad5e6f93e8407a6a55f2f5613edc17b51b89f67d7edcee01c67864381d"
         },
         "host-environment-markers": {
             "implementation_name": "cpython",
@@ -9,12 +9,12 @@
             "os_name": "posix",
             "platform_machine": "x86_64",
             "platform_python_implementation": "CPython",
-            "platform_release": "17.4.0",
-            "platform_system": "Darwin",
-            "platform_version": "Darwin Kernel Version 17.4.0: Sun Dec 17 09:19:54 PST 2017; root:xnu-4570.41.2~1/RELEASE_X86_64",
+            "platform_release": "4.15.6-300.fc27.x86_64",
+            "platform_system": "Linux",
+            "platform_version": "#1 SMP Mon Feb 26 18:43:03 UTC 2018",
             "python_full_version": "3.6.4",
             "python_version": "3.6",
-            "sys_platform": "darwin"
+            "sys_platform": "linux"
         },
         "pipfile-spec": 6,
         "requires": {
@@ -56,6 +56,12 @@
                 "sha256:261c859be5c12ae7d4286dc6951e87e9e1a70a882a8b41fd926efc1ec4214f73"
             ],
             "version": "==2.1.2"
+        },
+        "sqlalchemy": {
+            "hashes": [
+                "sha256:249000654107a420a40200f1e0b555a79dfd4eff235b2ff60bc77714bd045f2d"
+            ],
+            "version": "==1.2.5"
         },
         "tornado": {
             "hashes": [

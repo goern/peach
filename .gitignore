@@ -103,3 +103,5 @@ ENV/
 .pytest_cache/
 data/
 .vscode/
+luigi-state.pkl
+luigi-task-hist.db
