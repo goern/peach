@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-#   thoth-dependency-monkey
+#   peach
 #   Copyright(C) 2018 Christoph Görn
 #
 #   This program is free software: you can redistribute it and / or modify
@@ -16,30 +16,56 @@
 #   You should have received a copy of the GNU General Public License
 #   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-"""Thoth: LogAggregator"""
+"""Thoth: TravisBuildLogAggregator"""
 
 import os
 import json
 import codecs
-import tempfile
+import logging
 
 import luigi
 from tornado import httpclient
 
+from luigi_s3_target import S3Target
 
-__version__ = '0.1.0'
+__version__ = '0.2.0-dev'
 
-TRAVIS_TOKEN = 'FlNtKcTAawHcpFTvxprCqA'
+
+# get our configuration from ENV
+DEBUG = bool(os.getenv('DEBUG', False))
+FILES_ON_CEPH = bool(os.getenv('PEACH_FILES_ON_CEPH', False))
+BUCKET_NAME = os.getenv('THOTH_CEPH_BUCKET_NAME')
+BUCKET_PREFIX = os.getenv('THOTH_CEPH_BUCKET_PREFIX')
+TRAVIS_TOKEN = os.getenv('PEACH_TRAVIS_TOKEN')
+
+# HTTP request headers used to talk to Travis CI API
 HEADERS = {'Travis-API-Version': '3',
-           'User-Agent': 'ThothLogAggragator/0.1.0 luigi/2.5.7',
+           'User-Agent': 'ThothTravisBuildLogAggregator/'+__version__+' luigi/2.7.3',
            'Authorization': 'token ' + TRAVIS_TOKEN}
+
+if DEBUG:
+    logging.basicConfig(level=logging.DEBUG)
+else:
+    logging.basicConfig(level=logging.INFO)
+
+logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
 
 class AggregateRepositories(luigi.Task):
+    """Aggregate all Repositories of one Owner/Organisation/User and store the list of repositories in a TSV file
+
+    :param owner: Owner/Organisation/User
+    """
+
+    retry_count = 2
+
     owner = luigi.Parameter()
 
     def output(self):
-        return luigi.LocalTarget("data/{}/repositories.tsv".format(self.owner))
+        if FILES_ON_CEPH:
+            return S3Target(f's3://{BUCKET_NAME}/{BUCKET_PREFIX}/{self.owner}/repositories.tsv')
+        else:
+            return luigi.LocalTarget(f'data/{self.owner}/repositories.tsv')
 
     def run(self):
         http_client = httpclient.HTTPClient()
@@ -51,51 +77,53 @@ class AggregateRepositories(luigi.Task):
 
             _response = json.load(reader(response.buffer))
 
-            try:
-                os.mkdir('data/{}'.format(self.owner))
-            except FileExistsError as e:
-                pass
-
-            with open('data/{}/repositories.json'.format(self.owner), 'w') as jsonoutfile:
-                json.dump(_response, jsonoutfile)
-
-            with self.output().open('w') as outfile:
+            with self.output().open('wb') as outfile:
                 for entry in _response['repositories']:
-                    print(entry['id'], file=outfile)
+                    logger.debug(
+                        f"writing Repository id={entry['id']} to output")
+
+                    if FILES_ON_CEPH:
+                        outfile.write(f"{entry['id']}\n".encode())
+                    else:
+                        print(f"{entry['id']}", file=outfile)
 
         except httpclient.HTTPError as e:
-            print("Error: " + str(e))
+            logger.error("Error: " + str(e))
         except Exception as e:
-            print("Error: " + str(e))
+            logger.error("Error: " + str(e))
 
         http_client.close()
 
 
-def getPageFromTravis(url, offset, limit=100):
-    http_client = httpclient.HTTPClient()
-    reader = codecs.getreader('utf-8')
-
-    try:
-        response = http_client.fetch(
-            '{}?offset={}&limit={}'.format(url, offset, limit), headers=HEADERS)
-
-        return json.load(reader(response.buffer))
-    except httpclient.HTTPError as e:
-        print("Error: " + str(e))
-
-    except Exception as e:
-        print("Error: " + str(e))
-
-    http_client.close()
-
-    return None
-
-
-class GetAllBuilds(luigi.Task):
+class GetAllTravisBuilds(luigi.Task):
+    """GetAllTravisBuilds will download all the Build information from Travis and store them to one JSON file."""
     owner = luigi.Parameter()
 
+    def getPageFromTravis(self, url, offset, limit=100):
+        """Paginate thru travis API"""
+        http_client = httpclient.HTTPClient()
+        reader = codecs.getreader('utf-8')
+
+        try:
+            response = http_client.fetch(
+                '{}?offset={}&limit={}'.format(url, offset, limit), headers=HEADERS)
+
+            return json.load(reader(response.buffer))
+
+        except httpclient.HTTPError as e:
+            logger.error("Error: " + str(e))
+        except Exception as e:
+            logger.error("Error: " + str(e))
+
+        http_client.close()
+
+        return None
+
     def output(self):
-        return luigi.LocalTarget('data/{}/builds.json'.format(self.owner))
+        if FILES_ON_CEPH:
+            return S3Target('s3://{}/{}/{}/builds.json'.format('DH-DEV-DATA', 'data/thoth-travis', self.owner))
+        else:
+            return luigi.LocalTarget('data/{}/builds.json'.format(self.owner))
 
     def run(self):
         is_last = False
@@ -105,9 +133,9 @@ class GetAllBuilds(luigi.Task):
         all_builds = []
 
         while not is_last:
-            builds = getPageFromTravis(
+            builds = self.getPageFromTravis(
                 'https://api.travis-ci.org/builds', offset + limit)
-            print(json.dumps(builds['@pagination']))
+            logger.debug(json.dumps(builds['@pagination']))
 
             is_last = builds['@pagination']['is_last']
             offset = builds['@pagination']['offset']
@@ -115,15 +143,20 @@ class GetAllBuilds(luigi.Task):
 
             all_builds.extend(builds['builds'])
 
-        with self.output().open('w') as outfile:
+        with self.output().open('wb') as outfile:
             json.dump(all_builds, outfile)
 
 
 class AggregateJobs(luigi.Task):
+    retry_count = 4
+
     owner = luigi.Parameter()
 
     def output(self):
-        return luigi.LocalTarget('data/{}/jobs.tsv'.format(self.owner))
+        if FILES_ON_CEPH:
+            return S3Target(f's3://{BUCKET_NAME}/{BUCKET_PREFIX}/{self.owner}/jobs.tsv')
+        else:
+            return luigi.LocalTarget(f'data/{self.owner}/jobs.tsv')
 
     def requires(self):
         return AggregateRepositories(self.owner)
@@ -132,47 +165,62 @@ class AggregateJobs(luigi.Task):
         http_client = httpclient.HTTPClient()
         reader = codecs.getreader('utf-8')
 
-        # maybe we need that directory later...
-        try:
-            os.mkdir('data/{}'.format(self.owner))
-        except FileExistsError as e:
-            pass
-
         # lets read all the repo id
-        with self.input().open('r') as infile:
-            repos = infile.read().splitlines()
+        infile = self.input().open('rb')
+        repos = infile.read().splitlines()
 
         try:
-            with self.output().open('w') as outfile:
+            with self.output().open('wb') as outfile:
                 for repo in repos:
+                    if FILES_ON_CEPH:
+                        repo = repo.decode('utf-8')
+
+                    logger.debug('working on repo {}'.format(repo))
+
                     response = http_client.fetch(
-                        'https://api.travis-ci.org/repo/{}/builds'.format(repo), headers=HEADERS)
+                        f'https://api.travis-ci.org/repo/{repo}/builds', headers=HEADERS)
+
+                    logger.debug(
+                        'got response from Travis API: {}'.format(response))
 
                     _response = json.load(reader(response.buffer))
 
                     for entry in _response['builds']:
                         for job in entry['jobs']:
-                            print(job['id'], file=outfile)
+                            logger.debug(
+                                'writing Job id={} to output'.format(job['id']))
+
+                            if FILES_ON_CEPH:
+                                outfile.write(f"{job['id']}\n".encode())
+                            else:
+                                print(f"{job['id']}", file=outfile)
 
         except httpclient.HTTPError as e:
-            print("Error: " + str(e))
+            logger.error(f"Error: {e}: repo id: {repo}")
         except Exception as e:
-            print("Error: " + str(e))
+            logger.error("Error: " + str(e))
 
         http_client.close()
 
 
-class AggregateLogs(luigi.Task):
+class AggregateTravisLogs(luigi.Task):
     owner = luigi.Parameter()
 
     def requires(self):
         return AggregateJobs(self.owner)
 
     def run(self):
-        with self.input().open('r') as infile:
-            jobs = infile.read().splitlines()
+        infile = self.input().open('rb')
+        jobs = infile.read().splitlines()
 
-        fetch_logs = [FetchLog(j, self.owner) for j in jobs]
+        fetch_logs = []
+
+        for job in jobs:
+            if FILES_ON_CEPH:
+                job = job.decode('utf-8')
+
+            fetch_logs.append(FetchLog(job, self.owner))
+
         yield fetch_logs
 
 
@@ -181,7 +229,10 @@ class FetchLog(luigi.Task):
     owner = luigi.Parameter()
 
     def output(self):
-        return luigi.LocalTarget('data/{}/jobs/{}/log.json'.format(self.owner, self.job))
+        if FILES_ON_CEPH:
+            return S3Target(f's3://{BUCKET_NAME}/{BUCKET_PREFIX}/{self.owner}/jobs/{self.job}/log.json')
+        else:
+            return luigi.LocalTarget(f'data/{self.owner}/jobs/{self.job}/log.json')
 
     def run(self):
         http_client = httpclient.HTTPClient()
@@ -189,17 +240,20 @@ class FetchLog(luigi.Task):
 
         try:
             response = http_client.fetch(
-                'https://api.travis-ci.org/job/{}/log'.format(self.job), headers=HEADERS)
+                f'https://api.travis-ci.org/job/{self.job}/log', headers=HEADERS)
 
             _response = json.load(reader(response.buffer))
 
-            with self.output().open('w') as outfile:
-                json.dump(_response, outfile)
+            with self.output().open('wb') as outfile:
+                if FILES_ON_CEPH:
+                    outfile.write(response.body)
+                else:
+                    json.dump(_response, outfile)
 
         except httpclient.HTTPError as e:
-            print("Error: " + str(e))
+            logger.error("Error: " + str(e))
         except Exception as e:
-            print("Error: " + str(e))
+            logger.error("Error: " + str(e))
 
         http_client.close()
 
@@ -211,22 +265,28 @@ class FetchRawLog(luigi.Task):
     owner = luigi.Parameter()
 
     def output(self):
-        return luigi.LocalTarget('data/{}/jobs/{}/log.txt'.format(self.owner, self.job))
+        if FILES_ON_CEPH:
+            return S3Target(f's3://{BUCKET_NAME}/{BUCKET_PREFIX}/{self.owner}/jobs/{self.job}/log.txt')
+        else:
+            return luigi.LocalTarget(f'data/{self.owner}/jobs/{self.job}/log.txt')
 
     def run(self):
         http_client = httpclient.HTTPClient()
 
         try:
             response = http_client.fetch(
-                'https://api.travis-ci.org/v3/job/{}/log.txt'.format(self.job), headers=HEADERS)
+                f'https://api.travis-ci.org/v3/job/{self.job}/log.txt', headers=HEADERS)
 
             with self.output().open('wb') as outfile:
-                print(response.body.decode('utf8'), file=outfile)
+                if FILES_ON_CEPH:
+                    outfile.write(response.body)
+                else:
+                    print(response.body.decode('utf8'), file=outfile)
 
         except httpclient.HTTPError as e:
-            print("Error: " + str(e))
+            logger.error("Error: " + str(e))
         except Exception as e:
-            print("Error: " + str(e))
+            logger.error("Error: " + str(e))
 
         http_client.close()
 
@@ -237,6 +297,5 @@ if __name__ == '__main__':
     except FileExistsError as e:
         pass
 
-    luigi.build([AggregateLogs('radanalyticsio'),
-                 AggregateLogs('manageiq'),
-                 GetAllBuilds('goern')])
+    luigi.build([AggregateTravisLogs('radanalyticsio'),
+                 GetAllTravisBuilds('goern')])
